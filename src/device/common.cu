@@ -23,6 +23,7 @@ __global__ void ncclDevKernel_Generic(ncclDevKernelArgs4K NCCL_GRID_CONSTANT con
 
 __device__ void ncclDevFunc_Nop() {}
 
+
 __device__ __managed__ unsigned long long g_total_cycles = 0;
 __device__ __managed__ unsigned long long g_total_spins = 0;
 __device__ __managed__ unsigned long long g_total_calls = 0;
