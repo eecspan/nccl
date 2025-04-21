@@ -4,6 +4,10 @@
  * See LICENSE.txt for license information
  ************************************************************************/
 
+extern __device__ __managed__ unsigned long long g_total_cycles;
+extern __device__ __managed__ unsigned long long g_total_spins;
+extern __device__ __managed__ unsigned long long g_total_calls;
+
 template<typename T, typename RedOp, typename Fan, int Direct, int P2p>
 class Primitives<T, RedOp, Fan, Direct, ProtoLL, P2p>:
   public PrimitivesWithoutDirect<Primitives<T, RedOp, Fan, Direct, ProtoLL, P2p>> {
@@ -100,13 +104,162 @@ class Primitives<T, RedOp, Fan, Direct, ProtoLL, P2p>:
     uint32_t flag = recvFlag(i);
     uint32_t data1, flag1, data2, flag2;
     int spins = 0;
+    // 记录开始时间
+    uint64_t start_cycles, end_cycles, elapsed_cycles;
+    if (ncclShmem.comm.rank == 0 && blockIdx.x == 0 && threadIdx.x == 0)
+      start_cycles = clock64();
     do {
       asm volatile("ld.volatile.global.v4.u32 {%0,%1,%2,%3}, [%4];" : "=r"(data1), "=r"(flag1), "=r"(data2), "=r"(flag2) : "l"(&src->i4) : "memory");
       if (checkAbort(spins, 0)) break;
     } while ((flag1 != flag) || (flag2 != flag));
+
+    if (ncclShmem.comm.rank == 0 && blockIdx.x == 0 && threadIdx.x == 0) {
+      end_cycles = clock64();
+      elapsed_cycles = (end_cycles - start_cycles);
+      // 更新全局计数器
+      atomicAdd(&g_total_cycles, (unsigned long long)elapsed_cycles);
+      atomicAdd(&g_total_spins, (unsigned long long)spins);
+      atomicAdd(&g_total_calls, 1ULL);
+      // printf("GPU %d, Thread %d: readLL wait cycles=%llu, total_cycles=%llu, spins=%d, total_spins=%llu, total_calls=%llu\n", 
+        // ncclShmem.comm.rank, threadIdx.x, elapsed_cycles, g_total_cycles, spins, g_total_spins, g_total_calls);
+      if (g_total_calls == 960)
+      {
+        printf("=== NCCL readLL 自旋等待统计 ===\n");
+        printf("总自旋次数: %llu\n", g_total_spins);
+        printf("总调用次数: %llu\n", g_total_calls);
+        printf("总周期数: %llu\n", g_total_cycles);
+
+        double avgSpins = (double)g_total_spins / g_total_calls;
+        double avgCycles = (double)g_total_cycles / g_total_calls;
+        printf("平均自旋次数: %.2f\n", avgSpins);
+        printf("平均周期数: %.2f\n", avgCycles);
+        
+        // 估算等待时间（假设 GPU 时钟约为 1.5 GHz）
+        double avgTimeMs = avgCycles / 1500000.0;
+        printf("估计平均等待时间: %.3f 毫秒\n", avgTimeMs);
+        printf("================================\n");
+      }
+    }
+    
     uint64_t val64 = data1 + (((uint64_t)data2) << 32);
     return val64;
   }
+
+  // __device__ uint64_t readLL(int offset, int i) {
+  //   union ncclLLFifoLine* src = recvPtr(i) + offset;
+  //   uint32_t flag = recvFlag(i);
+  //   uint32_t data1, flag1, data2, flag2;
+  //   int spins = 0;
+
+  //   // 记录开始时间
+  //   uint64_t start_cycles = clock64();
+
+  //   do {
+  //     asm volatile("ld.volatile.global.v4.u32 {%0,%1,%2,%3}, [%4];" : "=r"(data1), "=r"(flag1), "=r"(data2), "=r"(flag2) : "l"(&src->i4) : "memory");
+  //     if (checkAbort(spins, 0)) break;
+  //   } while ((flag1 != flag) || (flag2 != flag));
+
+  //   // 记录结束时间
+  //   uint64_t end_cycles = clock64();
+  //   uint64_t elapsed_cycles = end_cycles - start_cycles;
+  //   if (threadIdx.x % 32 == 0 and ncclShmem.comm.rank == 0) {
+  //     // 估算时间（假设时钟频率约为1GHz，则1M周期≈1ms）
+  //     float elapsed_ms = elapsed_cycles / 1440000.0f;
+  //     printf("GPU %d, Thread %d: readLL wait cycles=%llu (≈%.3f ms), spins=%d\n", 
+  //            ncclShmem.comm.rank, threadIdx.x, elapsed_cycles, elapsed_ms, spins);
+  //   }
+  //   uint64_t val64 = data1 + (((uint64_t)data2) << 32);
+  //   return val64;
+  // }
+
+
+  // __device__ uint64_t readLL(int offset, int i) {
+  //   union ncclLLFifoLine* src = recvPtr(i) + offset;
+  //   uint32_t flag = recvFlag(i);
+  //   uint32_t data1, flag1, data2, flag2;
+  //   int spins = 0;
+  //   int backoff = 20 * 1000;
+  //   int window = 4;
+  //   do {
+  //     asm volatile("nanosleep.u32 %0;" :: "r"(backoff));
+  //     asm volatile("ld.volatile.global.v4.u32 {%0,%1,%2,%3}, [%4];" : 
+  //                 "=r"(data1), "=r"(flag1), "=r"(data2), "=r"(flag2) : 
+  //                 "l"(&src->i4) : "memory");
+      
+  //     if ((flag1 == flag) && (flag2 == flag)) 
+  //       break;
+        
+  //     if (checkAbort(spins, 0)) 
+  //       break;
+        
+  //     // 引入延迟，减少内存请求频率
+  //     // if (spins % window == 0) { // 每8次尝试后执行一次更长的延迟
+  //     //   asm volatile("nanosleep.u32 %0;" :: "r"(backoff)); // PTX硬件延迟
+
+  //       // 限制最大退避值，防止等待时间过长
+  //       // if (backoff < 256)
+  //       //   backoff *= 2;
+  //     }
+  //   } while (true);
+  //   uint64_t val64 = data1 + (((uint64_t)data2) << 32);
+  //   return val64;
+  // }
+
+
+// __device__ uint64_t readLL(int offset, int i) {
+//   union ncclLLFifoLine* src = recvPtr(i) + offset;
+//   uint32_t flag = recvFlag(i);
+//   uint32_t data1, flag1, data2, flag2;
+//   int spins = 0;
+//   int backoff = 1;
+//   const int max_backoff = 1024;
+//   volatile int dummy = 0;
+
+//   // 线程局部随机种子（基于线程ID和时钟）
+//   uint32_t jitter = (threadIdx.x + clock()) & 0xFF;
+
+//   // 首次内存读取
+//   asm volatile("ld.volatile.global.v4.u32 {%0,%1,%2,%3}, [%4];" 
+//               : "=r"(data1), "=r"(flag1), "=r"(data2), "=r"(flag2) 
+//               : "l"(&src->i4) 
+//               : "memory");
+//   if ((flag1 == flag) && (flag2 == flag)) goto done;
+
+//   do {
+//       // 阶段1：寄存器内多次检查（避免重复读内存）
+//       for (int k = 0; k < 3; k++) { // 最多3次寄存器检查
+//           // 短延迟（约20 cycles）让出发行资源
+//           asm volatile("nanosleep.u32 20;");
+            
+//           // 重新读取内存但限定为volatile访问
+//           asm volatile("ld.volatile.global.v4.u32 {%0,%1,%2,%3}, [%4];" 
+//                       : "=r"(data1), "=r"(flag1), "=r"(data2), "=r"(flag2) 
+//                       : "l"(&src->i4) 
+//                       : "memory");
+          
+//           if ((flag1 == flag) && (flag2 == flag)) break;
+//       }
+
+//       // 阶段2：指数退避+随机抖动
+//       backoff = min(max_backoff, backoff + (jitter % 4)); // 带随机增量
+//       asm volatile("nanosleep.u32 %0;" :: "r"(backoff * 10)); // PTX硬件延迟
+
+//       // 阶段3：重新读取内存
+//       asm volatile("ld.volatile.global.v4.u32 {%0,%1,%2,%3}, [%4];" 
+//                   : "=r"(data1), "=r"(flag1), "=r"(data2), "=r"(flag2) 
+//                   : "l"(&src->i4) 
+//                   : "memory");
+
+//       // 更新随机抖动值
+//       jitter = (jitter * 13 + 17) & 0xFF; // 简单伪随机生成
+
+//       if (checkAbort(spins, 0)) break;
+//   } while (true);
+
+// done:
+//   uint64_t val64 = data1 + (((uint64_t)data2) << 32);
+//   return val64;
+// }
 
   template<int BeginIx>
   __device__ void readLLBeginAll(int offset, ncclLLFifoLine(&line)[MaxRecv]) {
